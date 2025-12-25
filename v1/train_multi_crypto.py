@@ -22,21 +22,21 @@ import yfinance as yf
 
 print("="*80)
 print("CRYPTO SYSTEM v2 - MULTI-CRYPTO TRAINING (YFINANCE)")
-print("Cryptocurrencies × 2 Timeframes (1d + 1h) × 7000+ Candles")
+print("Cryptocurrencies x 2 Timeframes (1d + 1h) x 7000+ Candles")
 print("="*80)
 print()
 
 gpus = tf.config.list_physical_devices('GPU')
 if gpus:
-    print(f"✓ GPU: {len(gpus)} device(s)")
+    print(f"GPU: {len(gpus)} device(s)")
     for gpu in gpus:
         tf.config.experimental.set_memory_growth(gpu, True)
 else:
-    print("⚠ No GPU detected")
+    print("No GPU detected")
 
 OUTPUT_DIR = Path("/content/all_models/multi_crypto")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-print(f"✓ Output directory: {OUTPUT_DIR}")
+print(f"Output directory: {OUTPUT_DIR}")
 print()
 
 CRYPTOS = [
@@ -110,22 +110,28 @@ def fetch_crypto_data(symbol, yfinance_ticker, interval):
         if df is None or len(df) == 0:
             print("NO DATA")
             return None
+        
+        df = df.copy()
+        
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-        df.columns = df.columns.str.lower()
+        
+        df.columns = [c.lower() for c in df.columns]
+        
+        df.index.name = 'timestamp'
         df = df.reset_index()
-        if 'date' in df.columns:
-            df = df.rename(columns={'date': 'timestamp'})
-        elif 'datetime' in df.columns:
-            df = df.rename(columns={'datetime': 'timestamp'})
+        
         required = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
         missing = [c for c in required if c not in df.columns]
+        
         if missing:
             print(f"MISSING: {missing}")
             return None
+        
         df = df[required].copy()
         df = df.dropna()
         df = df[df['volume'] > 0]
+        
         print(f"{len(df)} candles")
         return df
     except Exception as e:
@@ -288,5 +294,5 @@ print(f"\nAll models saved to: {OUTPUT_DIR}")
 print(f"Total files created: {len(list(OUTPUT_DIR.glob('*')))}")
 
 print("\n" + "="*80)
-print("✓ TRAINING COMPLETE!")
+print("TRAINING COMPLETE!")
 print("="*80)
