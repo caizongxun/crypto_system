@@ -26,24 +26,17 @@ print("CRYPTO SYSTEM - COLAB ENVIRONMENT SETUP")
 print("="*80 + "\n")
 
 # ============================================================================
-# Step 1: Install System Dependencies
+# Step 1: Update Package Manager
 # ============================================================================
-logger.info("Step 1: Installing system dependencies...")
-
-system_packages = [
-    "build-essential",
-    "ta-lib",
-]
-
-for pkg in system_packages:
-    logger.info(f"  Installing {pkg}...")
-    subprocess.check_call(["apt-get", "update"])
-    subprocess.check_call(["apt-get", "install", "-y", pkg])
-
-logger.info("✓ System dependencies installed\n")
+logger.info("Step 1: Updating package manager...")
+try:
+    subprocess.check_call(["apt-get", "update", "-qq"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    logger.info("✓ Package manager updated\n")
+except Exception as e:
+    logger.warning(f"⚠ Could not update apt: {str(e)}\n")
 
 # ============================================================================
-# Step 2: Install Python Packages
+# Step 2: Install Python Packages (No System Dependencies)
 # ============================================================================
 logger.info("Step 2: Installing Python packages...")
 
@@ -61,11 +54,37 @@ python_packages = [
     "requests>=2.31.0",
 ]
 
+failed_packages = []
 for pkg in python_packages:
-    logger.info(f"  Installing {pkg}...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", pkg])
+    try:
+        logger.info(f"  Installing {pkg}...")
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "-q", pkg],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+    except Exception as e:
+        logger.warning(f"  ⚠ Failed to install {pkg}: {str(e)}")
+        failed_packages.append(pkg)
 
-logger.info("✓ Python packages installed\n")
+if failed_packages:
+    logger.warning(f"\n⚠ {len(failed_packages)} packages failed to install:")
+    for pkg in failed_packages:
+        logger.warning(f"   - {pkg}")
+    logger.warning("\nAttempting alternative installation...\n")
+    
+    # Try alternative installation
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "--upgrade", "-q"] + failed_packages,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        logger.info("✓ Alternative installation succeeded\n")
+    except Exception as e:
+        logger.warning(f"✗ Alternative installation also failed: {str(e)}\n")
+else:
+    logger.info("✓ Python packages installed\n")
 
 # ============================================================================
 # Step 3: Verify GPU
@@ -98,8 +117,11 @@ logger.info("Step 4: Mounting Google Drive (optional)...")
 
 try:
     from google.colab import drive
-    drive.mount('/content/drive', force_remount=False)
-    logger.info("✓ Google Drive mounted\n")
+    try:
+        drive.mount('/content/drive', force_remount=False)
+        logger.info("✓ Google Drive mounted\n")
+    except:
+        logger.info("✓ Google Drive already mounted\n")
 except:
     logger.warning("⚠ Google Drive mount skipped (not in Colab or already mounted)\n")
 
@@ -113,21 +135,21 @@ cache_dir.mkdir(parents=True, exist_ok=True)
 logger.info(f"✓ Cache directory created: {cache_dir}\n")
 
 # ============================================================================
-# Step 6: Verify Imports
+# Step 6: Verify Critical Imports
 # ============================================================================
 logger.info("Step 6: Verifying critical imports...")
 
-imports_to_check = [
-    "pandas",
-    "numpy",
-    "tensorflow",
-    "sklearn",
-    "ccxt",
-    "matplotlib",
-]
+imports_to_check = {
+    "pandas": "pd",
+    "numpy": "np",
+    "tensorflow": "tf",
+    "sklearn": "sklearn",
+    "ccxt": "ccxt",
+    "matplotlib": "plt",
+}
 
 all_good = True
-for module_name in imports_to_check:
+for module_name, alias in imports_to_check.items():
     try:
         __import__(module_name)
         logger.info(f"✓ {module_name} imported successfully")
@@ -135,11 +157,17 @@ for module_name in imports_to_check:
         logger.error(f"✗ Failed to import {module_name}: {str(e)}")
         all_good = False
 
+logger.info("")
+
+# ============================================================================
+# Summary
+# ============================================================================
 if all_good:
-    logger.info("\n" + "="*80)
-    logger.info("SETUP COMPLETED SUCCESSFULLY!")
+    logger.info("="*80)
+    logger.info("✓ SETUP COMPLETED SUCCESSFULLY!")
     logger.info("="*80)
     logger.info("\nNext steps:")
+    logger.info("")
     logger.info("1. In the next Colab cell, run the training script:")
     logger.info("")
     logger.info("   import requests, time")
@@ -147,12 +175,19 @@ if all_good:
     logger.info("   exec(requests.get(url).text)")
     logger.info("")
     logger.info("2. The training will:")
-    logger.info("   - Fetch data from Binance US API (2-3 min)")
-    logger.info("   - Process features (1-2 min)")
-    logger.info("   - Train on GPU (T4: 30-40 min, A100: 10-15 min)")
-    logger.info("   - Save model to /content/all_models/v1/")
-    logger.info("\n")
+    logger.info("   • Fetch data from Binance US API (2-3 min)")
+    logger.info("   • Process features (1-2 min)")
+    logger.info("   • Train on GPU (T4: 30-40 min, A100: 10-15 min)")
+    logger.info("   • Save model to /content/all_models/v1/")
+    logger.info("")
 else:
-    logger.error("\nSome imports failed. Please check the error messages above.")
-    logger.error("Try running: !pip install --upgrade tensorflow keras pandas numpy scikit-learn ccxt")
-    print("\n")
+    logger.error("\n" + "="*80)
+    logger.error("✗ SETUP INCOMPLETE - Some critical imports failed")
+    logger.error("="*80)
+    logger.error("\nTroubleshooting:")
+    logger.error("1. Try manual installation:")
+    logger.error("   !pip install --upgrade tensorflow keras pandas numpy scikit-learn ccxt")
+    logger.error("")
+    logger.error("2. If that fails, check Colab's internet connection")
+    logger.error("3. Try again in a new notebook")
+    logger.error("")
