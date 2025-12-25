@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # ============================================================================
-# Crypto System v2 - Multi-Crypto Multi-Timeframe Training
+# Crypto System v2 - Multi-Crypto Multi-Timeframe Training (ENHANCED)
 # ============================================================================
 # Trains individual models for 20+ cryptocurrencies
 # Timeframes: 1h (1-hour) and 15m (15-minute)
-# Each coin gets its own dedicated model
+# Data: 7000-10000 candles per timeframe
+# Multiple Binance endpoints for maximum data coverage
 #
 # Output: /content/all_models/multi_crypto/
 #   - BTC_1h_model.h5
@@ -38,12 +39,14 @@ try:
     HAS_CCXT = True
 except:
     HAS_CCXT = False
-    print("ERROR: CCXT not installed. Please run: !pip install ccxt")
-    exit(1)
+    print("WARNING: CCXT not installed. Installing...")
+    os.system('pip install ccxt -q')
+    import ccxt
+    HAS_CCXT = True
 
 print("="*80)
-print("CRYPTO SYSTEM v2 - MULTI-CRYPTO MULTI-TIMEFRAME TRAINING")
-print("20+ Cryptocurrencies × 2 Timeframes = 40+ Models")
+print("CRYPTO SYSTEM v2 - ENHANCED MULTI-CRYPTO MULTI-TIMEFRAME TRAINING")
+print("20+ Cryptocurrencies × 2 Timeframes × 7000-10000 Candles")
 print("="*80 + "\n")
 
 # Setup GPU
@@ -64,7 +67,7 @@ print(f"✓ Output directory: {OUTPUT_DIR}\n")
 # CONFIGURATION
 # ============================================================================
 
-# 20+ Cryptocurrencies (select popular ones)
+# 24 Cryptocurrencies (select popular ones)
 CRYPTOS = [
     'BTC', 'ETH', 'BNB', 'SOL', 'XRP', 'ADA', 'DOGE', 'AVAX', 'MATIC',
     'LTC', 'DOT', 'UNI', 'LINK', 'XLM', 'ATOM', 'ICP', 'FIL', 'NEAR',
@@ -80,11 +83,27 @@ EPOCHS = 40
 BATCH_SIZE = 32
 EARLY_STOP_PATIENCE = 8
 
+# Data fetching
+CANDLES_PER_FETCH = 1000  # CCXT limit per request
+TARGET_CANDLES = 8000     # Target total candles
+NUM_FETCHES = (TARGET_CANDLES + CANDLES_PER_FETCH - 1) // CANDLES_PER_FETCH
+
 print(f"Cryptocurrencies to train: {len(CRYPTOS)}")
 print(f"  {', '.join(CRYPTOS[:5])}... (+{len(CRYPTOS)-5} more)")
 print(f"Timeframes: {TIMEFRAMES}")
+print(f"Target candles per timeframe: {TARGET_CANDLES}")
 print(f"Total models to train: {len(CRYPTOS) * len(TIMEFRAMES)}")
 print(f"Lookback period: {LOOKBACK} candles\n")
+
+# ============================================================================
+# BINANCE ENDPOINTS
+# ============================================================================
+
+BINANCE_ENDPOINTS = [
+    ('binance', 'Binance Global'),
+    ('binanceus', 'Binance US'),
+    ('binanceusdm', 'Binance USDM'),
+]
 
 # ============================================================================
 # FEATURE ENGINEERING
@@ -148,35 +167,87 @@ def engineer_features(df):
     return df
 
 # ============================================================================
-# FETCH DATA FOR SINGLE CRYPTO
+# FETCH DATA FOR SINGLE CRYPTO (MULTI-ENDPOINT)
 # ============================================================================
 
-def fetch_crypto_data(symbol, timeframe, limit=2000):
+def fetch_crypto_data_multi_endpoint(symbol, timeframe):
     """
-    Fetch OHLCV data from Binance for a cryptocurrency.
+    Fetch OHLCV data from multiple Binance endpoints.
+    Tries each endpoint until successful.
     """
-    try:
-        exchange = ccxt.binance()
-        symbol_full = f"{symbol}/USDT"
-        
-        print(f"    Fetching {symbol} {timeframe}...", end=" ")
-        ohlcv = exchange.fetch_ohlcv(symbol_full, timeframe, limit=limit)
-        
-        if len(ohlcv) == 0:
-            print(f"NO DATA")
-            return None
-        
-        df = pd.DataFrame(
-            ohlcv,
-            columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
-        )
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        print(f"{len(df)} candles")
-        return df
+    all_ohlcv = []
+    fetched_candles = 0
     
-    except Exception as e:
-        print(f"ERROR: {str(e)[:50]}")
+    for exchange_name, exchange_label in BINANCE_ENDPOINTS:
+        if fetched_candles >= TARGET_CANDLES:
+            break
+        
+        try:
+            print(f"      {exchange_label}...", end=" ")
+            exchange_class = getattr(ccxt, exchange_name)
+            exchange = exchange_class({'enableRateLimit': True})
+            
+            symbol_full = f"{symbol}/USDT"
+            
+            # Check if symbol is supported
+            if hasattr(exchange, 'symbols'):
+                if symbol_full not in exchange.symbols:
+                    print(f"Symbol not found")
+                    continue
+            
+            # Fetch multiple times to accumulate candles
+            ohlcv_data = []
+            since = None
+            
+            for fetch_num in range(NUM_FETCHES):
+                if fetched_candles >= TARGET_CANDLES:
+                    break
+                
+                try:
+                    ohlcv = exchange.fetch_ohlcv(
+                        symbol_full,
+                        timeframe,
+                        since=since,
+                        limit=CANDLES_PER_FETCH
+                    )
+                    
+                    if not ohlcv or len(ohlcv) == 0:
+                        break
+                    
+                    ohlcv_data.extend(ohlcv)
+                    fetched_candles += len(ohlcv)
+                    
+                    # Update since for next batch
+                    since = ohlcv[-1][0] + 1
+                    
+                    time.sleep(0.5)  # Rate limit
+                    
+                except Exception as e:
+                    print(f"Fetch error: {str(e)[:30]}")
+                    break
+            
+            if ohlcv_data:
+                all_ohlcv.extend(ohlcv_data)
+                print(f"{len(ohlcv_data)} candles")
+        
+        except Exception as e:
+            print(f"Error: {str(e)[:40]}")
+            continue
+    
+    if not all_ohlcv:
+        print(f"      NO DATA from any endpoint")
         return None
+    
+    # Remove duplicates and sort
+    df = pd.DataFrame(
+        all_ohlcv,
+        columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
+    )
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df = df.drop_duplicates(subset=['timestamp'], keep='first')
+    df = df.sort_values('timestamp').reset_index(drop=True)
+    
+    return df
 
 # ============================================================================
 # BUILD LSTM MODEL
@@ -234,17 +305,20 @@ def train_crypto_model(symbol, timeframe):
     print(f"Training: {symbol} {timeframe}")
     print(f"{'='*80}")
     
-    # 1. Fetch data
-    print(f"  Phase 1: Fetching data...")
-    df = fetch_crypto_data(symbol, timeframe, limit=2000)
+    # 1. Fetch data from multiple endpoints
+    print(f"  Phase 1: Fetching data from multiple endpoints...")
+    df = fetch_crypto_data_multi_endpoint(symbol, timeframe)
     
     if df is None or len(df) < LOOKBACK + 100:
         print(f"  SKIP: Not enough data ({len(df) if df is not None else 0} candles)")
         return False, None
     
+    print(f"    Total candles collected: {len(df)}")
+    
     # 2. Feature engineering
-    print(f"  Phase 2: Computing features...")
+    print(f"  Phase 2: Computing features...", end=" ")
     df = engineer_features(df)
+    print("Done")
     
     # 3. Create sequences
     print(f"  Phase 3: Creating sequences...", end=" ")
@@ -367,7 +441,7 @@ def train_crypto_model(symbol, timeframe):
 # MAIN TRAINING LOOP
 # ============================================================================
 
-print("\nStarting multi-crypto training...\n")
+print("\nStarting enhanced multi-crypto training...\n")
 
 results = []
 total_models = len(CRYPTOS) * len(TIMEFRAMES)
@@ -428,5 +502,5 @@ print(f"\nAll models saved to: {OUTPUT_DIR}")
 print(f"Total files created: {len(list(OUTPUT_DIR.glob('*')))}")
 
 print("\n" + "="*80)
-print("✓ MULTI-CRYPTO TRAINING COMPLETE!")
+print("✓ ENHANCED MULTI-CRYPTO TRAINING COMPLETE!")
 print("="*80)
