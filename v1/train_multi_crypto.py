@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 # ============================================================================
-# Crypto System v2 - Multi-Crypto Multi-Timeframe Training (FIXED)
+# Crypto System v2 - Multi-Crypto Training with YFinance
 # ============================================================================
-# Trains individual models for 20+ cryptocurrencies
-# Timeframes: 1h (1-hour) and 15m (15-minute)
-# Data: 7000-10000 candles per timeframe
-# Multiple Binance endpoints for maximum data coverage
+# Uses YFinance instead of CCXT for reliable data access
+# Fetches 7000-10000 candles per timeframe
 
 import os
 import time
@@ -26,16 +24,14 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from sklearn.preprocessing import StandardScaler
 
-# Install CCXT if needed
-try:
-    import ccxt
-except:
-    print("Installing CCXT...")
-    os.system('pip install ccxt -q')
-    import ccxt
+# Install required packages
+print("Installing dependencies...")
+os.system('pip install yfinance -q')
+
+import yfinance as yf
 
 print("="*80)
-print("CRYPTO SYSTEM v2 - ENHANCED MULTI-CRYPTO MULTI-TIMEFRAME TRAINING (FIXED)")
+print("CRYPTO SYSTEM v2 - MULTI-CRYPTO TRAINING (YFINANCE)")
 print("20+ Cryptocurrencies × 2 Timeframes × 7000-10000 Candles")
 print("="*80 + "\n")
 
@@ -58,12 +54,27 @@ print(f"✓ Output directory: {OUTPUT_DIR}\n")
 # ============================================================================
 
 CRYPTOS = [
-    'BTC', 'ETH', 'BNB', 'SOL', 'XRP', 'ADA', 'DOGE', 'AVAX', 'MATIC',
-    'LTC', 'DOT', 'UNI', 'LINK', 'XLM', 'ATOM', 'ICP', 'FIL', 'NEAR',
-    'SAND', 'MANA', 'SHIB', 'OP', 'ARB', 'BLUR'
+    ('BTC', 'BTC-USD'),
+    ('ETH', 'ETH-USD'),
+    ('BNB', 'BNB-USD'),
+    ('SOL', 'SOL-USD'),
+    ('XRP', 'XRP-USD'),
+    ('ADA', 'ADA-USD'),
+    ('DOGE', 'DOGE-USD'),
+    ('AVAX', 'AVAX-USD'),
+    ('MATIC', 'MATIC-USD'),
+    ('LTC', 'LTC-USD'),
+    ('DOT', 'DOT-USD'),
+    ('UNI', 'UNI-USD'),
+    ('LINK', 'LINK-USD'),
+    ('XLM', 'XLM-USD'),
+    ('ATOM', 'ATOM-USD'),
 ]
 
-TIMEFRAMES = ['1h', '15m']
+TIMEFRAMES = {
+    '1h': '1h',
+    '15m': '15m',
+}
 
 LOOKBACK = 60
 EPOCHS = 40
@@ -71,7 +82,7 @@ BATCH_SIZE = 32
 EARLY_STOP_PATIENCE = 8
 
 print(f"Cryptocurrencies: {len(CRYPTOS)}")
-print(f"Timeframes: {TIMEFRAMES}")
+print(f"Timeframes: {list(TIMEFRAMES.keys())}")
 print(f"Total models to train: {len(CRYPTOS) * len(TIMEFRAMES)}")
 print(f"Lookback period: {LOOKBACK} candles\n")
 
@@ -122,68 +133,61 @@ def engineer_features(df):
     return df
 
 # ============================================================================
-# FETCH DATA (SIMPLIFIED & FIXED)
+# FETCH DATA WITH YFINANCE
 # ============================================================================
 
-def fetch_crypto_data(symbol, timeframe):
+def fetch_crypto_data(symbol, yfinance_ticker, interval):
     """
-    Fetch data using Binance API with proper error handling.
+    Fetch cryptocurrency data using YFinance.
+    Intervals: '1h' for 1-hour, '15m' for 15-minute
     """
     try:
-        print(f"    Fetching {symbol} {timeframe}...", end=" ")
+        print(f"    Fetching {symbol} {interval}...", end=" ")
         
-        # Use binance exchange
-        exchange = ccxt.binance({
-            'enableRateLimit': True,
-            'timeout': 30000,
-            'rateLimit': 500
-        })
+        # Calculate date range for enough candles
+        if interval == '1h':
+            days_back = 400  # ~400 days × 24 hours ≈ 9600 candles
+        else:  # 15m
+            days_back = 100  # ~100 days × 96 (96*15min per day) ≈ 9600 candles
         
-        symbol_full = f"{symbol}/USDT"
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days_back)
         
-        # Fetch multiple batches
-        all_data = []
-        since = None
+        # Fetch data
+        df = yf.download(
+            yfinance_ticker,
+            start=start_date.date(),
+            end=end_date.date(),
+            interval=interval,
+            progress=False,
+            prepost=False
+        )
         
-        for batch in range(8):  # 8 batches × 1000 candles = 8000 candles
-            try:
-                # Fetch 1000 candles
-                ohlcv = exchange.fetch_ohlcv(
-                    symbol_full,
-                    timeframe,
-                    since=since,
-                    limit=1000
-                )
-                
-                if not ohlcv or len(ohlcv) == 0:
-                    break
-                
-                all_data.extend(ohlcv)
-                
-                # Update since for next batch
-                if ohlcv:
-                    since = int(ohlcv[-1][0]) + 1
-                
-                time.sleep(0.3)  # Rate limit
-                
-            except Exception as e:
-                if batch == 0:
-                    raise  # If first batch fails, raise error
-                break  # Otherwise, continue with what we have
-        
-        if not all_data:
+        if df is None or len(df) == 0:
             print("NO DATA")
             return None
         
-        # Create DataFrame
-        df = pd.DataFrame(
-            all_data,
-            columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
-        )
+        # Rename columns to lowercase
+        df.columns = df.columns.str.lower()
         
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df = df.drop_duplicates(subset=['timestamp'])
-        df = df.sort_values('timestamp').reset_index(drop=True)
+        # Reset index to make timestamp a column
+        df = df.reset_index()
+        if 'date' in df.columns:
+            df = df.rename(columns={'date': 'timestamp'})
+        elif 'datetime' in df.columns:
+            df = df.rename(columns={'datetime': 'timestamp'})
+        
+        # Ensure required columns exist
+        required = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
+        if not all(col in df.columns for col in required):
+            print(f"MISSING COLUMNS: {[c for c in required if c not in df.columns]}")
+            return None
+        
+        # Keep only required columns
+        df = df[required]
+        
+        # Remove NaN values
+        df = df.dropna()
         
         print(f"{len(df)} candles")
         return df
@@ -233,14 +237,14 @@ def build_lstm_model(n_features, lookback):
 # TRAIN SINGLE CRYPTO-TIMEFRAME PAIR
 # ============================================================================
 
-def train_crypto_model(symbol, timeframe):
+def train_crypto_model(symbol, yfinance_ticker, interval):
     print(f"\n{'='*80}")
-    print(f"Training: {symbol} {timeframe}")
+    print(f"Training: {symbol} {interval}")
     print(f"{'='*80}")
     
     # 1. Fetch data
     print(f"  Phase 1: Fetching data...")
-    df = fetch_crypto_data(symbol, timeframe)
+    df = fetch_crypto_data(symbol, yfinance_ticker, interval)
     
     if df is None or len(df) < LOOKBACK + 100:
         print(f"  SKIP: Not enough data ({len(df) if df is not None else 0} candles)")
@@ -341,8 +345,8 @@ def train_crypto_model(symbol, timeframe):
     # 8. Save model and scalers
     print(f"  Phase 7: Saving...", end=" ")
     
-    model_filename = f"{symbol}_{timeframe}_model.h5"
-    scalers_filename = f"{symbol}_{timeframe}_scalers.pkl"
+    model_filename = f"{symbol}_{interval}_model.h5"
+    scalers_filename = f"{symbol}_{interval}_scalers.pkl"
     
     model_path = OUTPUT_DIR / model_filename
     scalers_path = OUTPUT_DIR / scalers_filename
@@ -377,24 +381,24 @@ results = []
 total_models = len(CRYPTOS) * len(TIMEFRAMES)
 current_model = 0
 
-for symbol in CRYPTOS:
-    for timeframe in TIMEFRAMES:
+for symbol, yfinance_ticker in CRYPTOS:
+    for interval_name, interval_code in TIMEFRAMES.items():
         current_model += 1
-        print(f"[{current_model}/{total_models}] {symbol} {timeframe}")
+        print(f"[{current_model}/{total_models}] {symbol} {interval_name}")
         
-        success, mape = train_crypto_model(symbol, timeframe)
+        success, mape = train_crypto_model(symbol, yfinance_ticker, interval_code)
         
         if success:
             results.append({
                 'symbol': symbol,
-                'timeframe': timeframe,
+                'timeframe': interval_name,
                 'mape': mape,
                 'status': 'SUCCESS'
             })
         else:
             results.append({
                 'symbol': symbol,
-                'timeframe': timeframe,
+                'timeframe': interval_name,
                 'mape': None,
                 'status': 'SKIPPED'
             })
