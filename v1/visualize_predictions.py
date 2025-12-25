@@ -13,7 +13,6 @@ import tensorflow as tf
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-from matplotlib import font_manager
 import yfinance as yf
 
 print("="*80)
@@ -24,11 +23,16 @@ print()
 
 print("Installing dependencies...")
 os.system('pip install huggingface_hub -q')
-from huggingface_hub import hf_hub_download, list_repo_files
+from huggingface_hub import hf_hub_download
 
-print("Setting up...")
-from IPython.display import display
-import ipywidgets as widgets
+print("Setting up IPython widgets...")
+try:
+    from IPython.display import display
+    import ipywidgets as widgets
+    HAS_IPYWIDGETS = True
+except ImportError:
+    HAS_IPYWIDGETS = False
+    print("WARNING: ipywidgets not available, using command-line interface")
 
 # ============================================================================
 # CONFIGURATION
@@ -37,8 +41,8 @@ import ipywidgets as widgets
 HF_REPO = "zongowo111/cpb-models"
 HF_REPO_TYPE = "dataset"
 MODELS_FOLDER = "models_v5"
-LOCAL_CACHE = Path("/tmp/crypto_models")
-LOCAL_CACHE.mkdir(exist_ok=True)
+LOCAL_CACHE = Path("/tmp/crypto_models_cache")
+LOCAL_CACHE.mkdir(parents=True, exist_ok=True)
 
 CRYPTOS = {
     'BTC': 'BTC-USD',
@@ -114,33 +118,42 @@ def download_model(symbol, timeframe):
     try:
         if not model_path.exists():
             print(f"Downloading {model_name}...", end=" ", flush=True)
-            hf_hub_download(
+            downloaded_path = hf_hub_download(
                 repo_id=HF_REPO,
                 filename=f"{MODELS_FOLDER}/{model_name}",
                 repo_type=HF_REPO_TYPE,
-                cache_dir=str(LOCAL_CACHE),
-                force_filename=model_name
+                cache_dir=str(LOCAL_CACHE.parent),
             )
+            import shutil
+            shutil.copy(downloaded_path, model_path)
             print("Done")
         
         if not scalers_path.exists():
             print(f"Downloading {scalers_name}...", end=" ", flush=True)
-            hf_hub_download(
+            downloaded_path = hf_hub_download(
                 repo_id=HF_REPO,
                 filename=f"{MODELS_FOLDER}/{scalers_name}",
                 repo_type=HF_REPO_TYPE,
-                cache_dir=str(LOCAL_CACHE),
-                force_filename=scalers_name
+                cache_dir=str(LOCAL_CACHE.parent),
             )
+            import shutil
+            shutil.copy(downloaded_path, scalers_path)
             print("Done")
         
+        print(f"Loading model from {model_path}...", end=" ", flush=True)
         model = tf.keras.models.load_model(str(model_path))
+        print("Done")
+        
+        print(f"Loading scalers from {scalers_path}...", end=" ", flush=True)
         with open(scalers_path, 'rb') as f:
             scalers = pickle.load(f)
+        print("Done")
         
         return model, scalers
     except Exception as e:
-        print(f"ERROR loading model: {e}")
+        print(f"ERROR: {e}")
+        import traceback
+        traceback.print_exc()
         return None, None
 
 # ============================================================================
@@ -264,73 +277,85 @@ def plot_predictions(symbol, timeframe, timestamps, predicted, actual):
     plt.show()
 
 # ============================================================================
-# INTERACTIVE UI
+# MAIN VISUALIZATION FUNCTION
 # ============================================================================
 
-print("Creating interactive interface...")
-print()
+def visualize_crypto(symbol='BTC', timeframe='1d'):
+    print(f"\nLoading model for {symbol} {timeframe}...")
+    model, scalers = download_model(symbol, timeframe)
+    
+    if model is None:
+        print(f"ERROR: Could not load model")
+        return
+    
+    ticker = CRYPTOS[symbol]
+    print(f"\nFetching recent data for {symbol}...")
+    days = 3000 if timeframe == '1d' else 400
+    df = fetch_recent_data(ticker, timeframe, days=days)
+    
+    if df is None:
+        print(f"ERROR: Could not fetch data")
+        return
+    
+    print(f"Making predictions...")
+    timestamps, predicted, actual = predict(model, scalers, df)
+    
+    if timestamps is None:
+        print(f"ERROR: Could not make predictions")
+        return
+    
+    print(f"Plotting results...")
+    plot_predictions(symbol, timeframe, timestamps, predicted, actual)
 
-symbol_dropdown = widgets.Dropdown(
-    options=list(CRYPTOS.keys()),
-    value='BTC',
-    description='Crypto:'
-)
+# ============================================================================
+# INTERACTIVE UI (if available)
+# ============================================================================
 
-timeframe_dropdown = widgets.Dropdown(
-    options=TIMEFRAMES,
-    value='1d',
-    description='Timeframe:'
-)
-
-visualize_button = widgets.Button(description='Visualize', button_style='info')
-status_output = widgets.Output()
-
-def on_visualize_clicked(b):
-    with status_output:
-        status_output.clear_output()
-        symbol = symbol_dropdown.value
-        timeframe = timeframe_dropdown.value
-        ticker = CRYPTOS[symbol]
-        
-        print(f"Loading model for {symbol} {timeframe}...")
-        model, scalers = download_model(symbol, timeframe)
-        
-        if model is None:
-            print(f"ERROR: Could not load model")
-            return
-        
-        print(f"Fetching recent data for {symbol}...")
-        days = 3000 if timeframe == '1d' else 400
-        df = fetch_recent_data(ticker, timeframe, days=days)
-        
-        if df is None:
-            print(f"ERROR: Could not fetch data")
-            return
-        
-        print(f"Making predictions...")
-        timestamps, predicted, actual = predict(model, scalers, df)
-        
-        if timestamps is None:
-            print(f"ERROR: Could not make predictions")
-            return
-        
-        print(f"Plotting results...")
-        plot_predictions(symbol, timeframe, timestamps, predicted, actual)
-
-visualize_button.on_click(on_visualize_clicked)
-
-print()
-print("="*80)
-print("INTERACTIVE CONTROLS")
-print("="*80)
-
-ui = widgets.VBox([
-    widgets.HBox([symbol_dropdown, timeframe_dropdown]),
-    visualize_button,
-    status_output
-])
-
-display(ui)
-
-print()
-print("Select a cryptocurrency and timeframe, then click 'Visualize' to see predictions.")
+if HAS_IPYWIDGETS:
+    print("\nCreating interactive interface...")
+    print()
+    
+    symbol_dropdown = widgets.Dropdown(
+        options=list(CRYPTOS.keys()),
+        value='BTC',
+        description='Crypto:'
+    )
+    
+    timeframe_dropdown = widgets.Dropdown(
+        options=TIMEFRAMES,
+        value='1d',
+        description='Timeframe:'
+    )
+    
+    visualize_button = widgets.Button(description='Visualize', button_style='info')
+    status_output = widgets.Output()
+    
+    def on_visualize_clicked(b):
+        with status_output:
+            status_output.clear_output()
+            symbol = symbol_dropdown.value
+            timeframe = timeframe_dropdown.value
+            visualize_crypto(symbol, timeframe)
+    
+    visualize_button.on_click(on_visualize_clicked)
+    
+    print("="*80)
+    print("INTERACTIVE CONTROLS")
+    print("="*80)
+    
+    ui = widgets.VBox([
+        widgets.HBox([symbol_dropdown, timeframe_dropdown]),
+        visualize_button,
+        status_output
+    ])
+    
+    display(ui)
+    
+    print()
+    print("Select a cryptocurrency and timeframe, then click 'Visualize' to see predictions.")
+else:
+    print("To use interactive mode, run in Jupyter/Colab with:")
+    print("%run v1/visualize_predictions.py")
+    print()
+    print("Or use command-line mode:")
+    print("visualize_crypto('BTC', '1d')")
