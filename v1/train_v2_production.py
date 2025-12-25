@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================================================
-# Crypto System v2 - Production Grade Training
+# Crypto System v2 - Production Grade Training (FIXED)
 # ============================================================================
 # Improvements over v1:
 # 1. Predict LOG-RETURN instead of absolute price (much easier)
@@ -32,8 +32,7 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
 
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import mean_absolute_error, mean_squared_error, mean_absolute_percentage_error
-from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 try:
     import xgboost as xgb
@@ -50,7 +49,7 @@ except:
     print("Warning: CCXT not installed. Will use synthetic data fallback.")
 
 print("="*80)
-print("CRYPTO SYSTEM v2 - PRODUCTION GRADE TRAINING")
+print("CRYPTO SYSTEM v2 - PRODUCTION GRADE TRAINING (FIXED)")
 print("Target: 1-2% MAPE on LOG-RETURN predictions")
 print("="*80 + "\n")
 
@@ -179,16 +178,16 @@ def engineer_features(df):
     df['atr'] = df['true_range'].rolling(14).mean()
     
     # SYNTHETIC FUNDING RATE (simulates real funding pressure)
-    # In reality, fetch from Binance, but here we simulate based on price momentum
     df['funding_rate'] = df['momentum_10'].rolling(20).mean() / (df['close'].rolling(20).std() + 1e-8) * 0.00001
     
     # SYNTHETIC OPEN INTEREST (simulates leverage usage)
-    # Increases when volatility spikes and volume increases
-    volatility_vol = df['volatility'].rolling(20).std()
     df['open_interest_change'] = (df['volume_ratio'] - 1) * (df['volatility'] / 0.01) * 0.1
     
     # Fill NaN
     df = df.ffill().bfill()
+    
+    # Replace any inf values
+    df = df.replace([np.inf, -np.inf], 0)
     
     return df
 
@@ -232,6 +231,7 @@ def create_sequences(df, lookback=60):
 all_X = []
 all_y = []
 all_dates = []
+all_last_prices = []  # Store last price of each sequence for denormalization
 
 for symbol in symbols:
     df = all_data[symbol]
@@ -239,11 +239,19 @@ for symbol in symbols:
     all_X.append(X)
     all_y.append(y)
     all_dates.append(dates)
+    
+    # Store last prices for denormalization
+    last_prices = []
+    for i in range(len(df) - lookback - 1):
+        last_prices.append(df['close'].iloc[i+lookback-1])  # Price before prediction
+    all_last_prices.append(np.array(last_prices))
+    
     print(f"✓ {symbol}: X shape {X.shape}, y shape {y.shape}")
 
 X_combined = np.concatenate(all_X, axis=0)
 y_combined = np.concatenate(all_y, axis=0)
 dates_combined = np.concatenate(all_dates, axis=0)
+last_prices_combined = np.concatenate(all_last_prices, axis=0)
 
 print(f"\nTotal sequences: {X_combined.shape[0]}\n")
 
@@ -259,6 +267,7 @@ idx_sort = np.argsort(dates_combined)
 X_sorted = X_combined[idx_sort]
 y_sorted = y_combined[idx_sort]
 dates_sorted = dates_combined[idx_sort]
+last_prices_sorted = last_prices_combined[idx_sort]
 
 # Split: 70% train, 15% val, 15% test (CHRONOLOGICALLY)
 n_total = len(X_sorted)
@@ -268,14 +277,17 @@ n_val = int(n_total * 0.15)
 X_train = X_sorted[:n_train]
 y_train = y_sorted[:n_train]
 dates_train = dates_sorted[:n_train]
+last_prices_train = last_prices_sorted[:n_train]
 
 X_val = X_sorted[n_train:n_train+n_val]
 y_val = y_sorted[n_train:n_train+n_val]
 dates_val = dates_sorted[n_train:n_train+n_val]
+last_prices_val = last_prices_sorted[n_train:n_train+n_val]
 
 X_test = X_sorted[n_train+n_val:]
 y_test = y_sorted[n_train+n_val:]
 dates_test = dates_sorted[n_train+n_val:]
+last_prices_test = last_prices_sorted[n_train+n_val:]
 
 print(f"Train: {X_train.shape[0]} ({dates_train[0]} to {dates_train[-1]})")
 print(f"Val:   {X_val.shape[0]} ({dates_val[0]} to {dates_val[-1]})")
@@ -297,21 +309,19 @@ scaler_X = StandardScaler()
 scaler_X.fit(X_train_reshaped)
 
 # Transform all splits
-X_train_norm = X_train_reshaped[:]  # Already fitted
-for i in range(len(X_train_reshaped)):
-    X_train_norm[i] = scaler_X.transform(X_train_reshaped[i:i+1])[0]
+X_train_norm = X_train.copy()
+X_val_norm = X_val.copy()
+X_test_norm = X_test.copy()
 
-X_val_norm = X_val.reshape(-1, X_val.shape[2])
+# Apply scaler to each sequence
+for i in range(len(X_train_norm)):
+    X_train_norm[i] = scaler_X.transform(X_train[i])
+
 for i in range(len(X_val_norm)):
-    X_val_norm[i] = scaler_X.transform(X_val.reshape(-1, X_val.shape[2])[i:i+1])[0]
-X_val_norm = X_val_norm.reshape(X_val.shape)
+    X_val_norm[i] = scaler_X.transform(X_val[i])
 
-X_test_norm = X_test.reshape(-1, X_test.shape[2])
 for i in range(len(X_test_norm)):
-    X_test_norm[i] = scaler_X.transform(X_test.reshape(-1, X_test.shape[2])[i:i+1])[0]
-X_test_norm = X_test_norm.reshape(X_test.shape)
-
-X_train_norm = X_train_norm.reshape(X_train.shape)
+    X_test_norm[i] = scaler_X.transform(X_test[i])
 
 # Scaler for y (log-return)
 scaler_y = StandardScaler()
@@ -344,10 +354,29 @@ print("="*80)
 print("PHASE 6: BASELINE MODELS")
 print("="*80 + "\n")
 
+def safe_mape(y_true, y_pred):
+    """
+    Safe MAPE calculation that handles edge cases.
+    """
+    # Filter out NaN and Inf
+    valid_idx = ~(np.isnan(y_true) | np.isnan(y_pred) | np.isinf(y_true) | np.isinf(y_pred))
+    y_true_clean = y_true[valid_idx]
+    y_pred_clean = y_pred[valid_idx]
+    
+    if len(y_true_clean) == 0:
+        return np.nan
+    
+    # Avoid division by zero
+    denominator = np.abs(y_true_clean)
+    denominator = np.where(denominator < 1e-8, 1e-8, denominator)
+    
+    mape = np.mean(np.abs((y_true_clean - y_pred_clean) / denominator))
+    return mape
+
 # Baseline 1: NAIVE (predict zero return)
 print("Baseline 1: Naive (predict return = 0)")
 y_pred_naive = np.zeros_like(y_test)
-mape_naive = mean_absolute_percentage_error(y_test, y_pred_naive)
+mape_naive = safe_mape(y_test, y_pred_naive)
 print(f"  Naive MAPE: {mape_naive*100:.4f}%\n")
 
 # Baseline 2: XGBoost
@@ -359,8 +388,8 @@ if HAS_XGB:
         X_test_flat = X_test_norm.reshape(X_test_norm.shape[0], -1)
         
         xgb_model = xgb.XGBRegressor(
-            n_estimators=100,
-            max_depth=5,
+            n_estimators=50,
+            max_depth=4,
             learning_rate=0.1,
             random_state=42,
             verbosity=0
@@ -373,10 +402,11 @@ if HAS_XGB:
         
         y_pred_xgb_norm = xgb_model.predict(X_test_flat)
         y_pred_xgb = scaler_y.inverse_transform(y_pred_xgb_norm.reshape(-1, 1)).flatten()
-        mape_xgb = mean_absolute_percentage_error(y_test, y_pred_xgb)
+        mape_xgb = safe_mape(y_test, y_pred_xgb)
         print(f"  XGBoost MAPE: {mape_xgb*100:.4f}%\n")
     except Exception as e:
         print(f"  XGBoost error: {e}\n")
+        mape_xgb = None
 else:
     mape_xgb = None
 
@@ -461,7 +491,7 @@ y_pred = scaler_y.inverse_transform(y_pred_norm.reshape(-1, 1)).flatten()
 # Metrics on log-return
 mae_return = mean_absolute_error(y_test, y_pred)
 rmse_return = np.sqrt(mean_squared_error(y_test, y_pred))
-mape_return = mean_absolute_percentage_error(y_test, y_pred)
+mape_return = safe_mape(y_test, y_pred)
 
 print("LSTM Performance (on LOG-RETURN):")
 print(f"  MAE:  {mae_return:.8f} (avg error in return)")
@@ -469,27 +499,12 @@ print(f"  RMSE: {rmse_return:.8f}")
 print(f"  MAPE: {mape_return*100:.4f}%")
 print()
 
-# Convert back to price prediction errors
-print("\nComparison with Baselines:")
+# Compare with baselines
+print("Comparison with Baselines:")
 print(f"  Naive MAPE:  {mape_naive*100:.4f}%")
 if mape_xgb is not None:
     print(f"  XGBoost MAPE: {mape_xgb*100:.4f}%")
 print(f"  LSTM MAPE:   {mape_return*100:.4f}%")
-print()
-
-# Price-level MAPE (for reference)
-print("\nPrice-level MAPE (approximate):")
-last_prices = all_data[list(all_data.keys())[0]]['close'].iloc[n_train+n_val:].values
-if len(last_prices) >= len(y_test):
-    last_prices = last_prices[:len(y_test)]
-else:
-    # Replicate if not enough
-    last_prices = np.tile(last_prices, len(y_test) // len(last_prices) + 1)[:len(y_test)]
-
-price_pred = last_prices * np.exp(y_pred)
-price_actual = last_prices * np.exp(y_test)
-mape_price = mean_absolute_percentage_error(price_actual, price_pred)
-print(f"  LSTM Price MAPE: {mape_price*100:.4f}%")
 print()
 
 # Error statistics
@@ -508,6 +523,18 @@ direction_accuracy = direction_correct / len(y_test) * 100
 print(f"Direction Accuracy: {direction_accuracy:.2f}%")
 print()
 
+# Price-level MAPE (for reference)
+print("Price-level MAPE (approximate):")
+if len(last_prices_test) > 0:
+    # Denormalize to prices
+    price_pred = last_prices_test * np.exp(y_pred)
+    price_actual = last_prices_test * np.exp(y_test)
+    mape_price = safe_mape(price_actual, price_pred)
+    print(f"  LSTM Price MAPE: {mape_price*100:.4f}%")
+else:
+    print(f"  Warning: No price data available")
+print()
+
 # ============================================================================
 # SAVE MODEL
 # ============================================================================
@@ -522,4 +549,4 @@ print(f"Size: {model_path.stat().st_size / (1024*1024):.1f} MB")
 print(f"Scalers saved: {CACHE_DIR / 'scalers_v2.pkl'}")
 print()
 print(f"\n✓ Ready for production inference!")
-print(f"  Use: from v1.inference_v2 import CryptoPricePredictor")
+print(f"  Use: from v1.inference_v2 import CryptoPricePredictorV2")
