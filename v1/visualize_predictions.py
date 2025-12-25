@@ -1,257 +1,336 @@
 #!/usr/bin/env python3
-# ============================================================================
-# Crypto System v2 - Prediction Visualization
-# ============================================================================
-# Plots actual vs predicted prices with confidence bands
+import os
+import sys
+import pickle
+import warnings
+warnings.filterwarnings('ignore')
 
+from pathlib import Path
+from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import tensorflow as tf
-from pathlib import Path
-import pickle
 from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from matplotlib import font_manager
+import yfinance as yf
 
-try:
-    import ccxt
-    HAS_CCXT = True
-except:
-    HAS_CCXT = False
+print("="*80)
+print("CRYPTO PRICE PREDICTION VISUALIZER")
+print("Load models from Hugging Face and visualize predictions")
+print("="*80)
+print()
 
-print("Loading trained model and scalers...")
+print("Installing dependencies...")
+os.system('pip install huggingface_hub -q')
+from huggingface_hub import hf_hub_download, list_repo_files
 
-# Paths
-CACHE_DIR = Path("/content/all_models/v2")
-model_path = CACHE_DIR / "crypto_v2_final_model.h5"
-scaler_path = CACHE_DIR / "scalers_v2.pkl"
+print("Setting up...")
+from IPython.display import display
+import ipywidgets as widgets
 
-# Load model
-model = tf.keras.models.load_model(str(model_path))
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
 
-# Load scalers
-with open(scaler_path, 'rb') as f:
-    scalers_dict = pickle.load(f)
-    scaler_X = scalers_dict['X']
-    scaler_y = scalers_dict['y']
-    feature_cols = scalers_dict['feature_cols']
-    lookback = scalers_dict['lookback']
+HF_REPO = "zongowo111/cpb-models"
+HF_REPO_TYPE = "dataset"
+MODELS_FOLDER = "models_v5"
+LOCAL_CACHE = Path("/tmp/crypto_models")
+LOCAL_CACHE.mkdir(exist_ok=True)
 
-print(f"✓ Model loaded: {model_path}")
-print(f"✓ Scalers loaded: {scaler_path}")
+CRYPTOS = {
+    'BTC': 'BTC-USD',
+    'ETH': 'ETH-USD',
+    'BNB': 'BNB-USD',
+    'SOL': 'SOL-USD',
+    'XRP': 'XRP-USD',
+    'ADA': 'ADA-USD',
+    'DOGE': 'DOGE-USD',
+    'AVAX': 'AVAX-USD',
+    'LTC': 'LTC-USD',
+    'DOT': 'DOT-USD',
+    'UNI': 'UNI-USD',
+    'LINK': 'LINK-USD',
+    'XLM': 'XLM-USD',
+    'ATOM': 'ATOM-USD',
+}
+
+TIMEFRAMES = ['1d', '1h']
+LOOKBACK = 60
+
+print(f"HF Repository: {HF_REPO}")
+print(f"Models folder: {MODELS_FOLDER}")
+print(f"Cache directory: {LOCAL_CACHE}")
 print()
 
 # ============================================================================
-# FETCH FRESH BINANCE DATA FOR VISUALIZATION
+# FEATURE ENGINEERING
 # ============================================================================
-print("Fetching fresh BTC data for visualization...")
-
-def fetch_binance_data(symbol, timeframe='1h', limit=300):
-    if not HAS_CCXT:
-        print(f"  CCXT not available, using synthetic data")
-        return None
-    
-    try:
-        exchange = ccxt.binance()
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-        df = pd.DataFrame(
-            ohlcv,
-            columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
-        )
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        print(f"  ✓ Got {len(df)} candles from {df['timestamp'].iloc[0]} to {df['timestamp'].iloc[-1]}")
-        return df
-    except Exception as e:
-        print(f"  Error: {e}")
-        return None
-
-df_btc = fetch_binance_data('BTC/USDT', limit=300)
-
-if df_btc is None:
-    print("Cannot fetch data. Please check CCXT installation.")
-    print("You can still use the model for inference with your own data.")
-    exit(1)
-
-# ============================================================================
-# FEATURE ENGINEERING (SAME AS TRAINING)
-# ============================================================================
-print("\nComputing features...")
 
 def engineer_features(df):
     df = df.copy()
-    
     df['log_return'] = np.log(df['close'] / df['close'].shift(1))
     df['simple_return'] = (df['close'] - df['close'].shift(1)) / df['close'].shift(1)
-    
     df['volatility'] = df['log_return'].rolling(14).std()
     df['volatility_20'] = df['log_return'].rolling(20).std()
-    
     df['momentum_10'] = df['close'] - df['close'].shift(10)
     df['momentum_20'] = df['close'] - df['close'].shift(20)
-    
     df['price_range'] = (df['high'] - df['low']) / df['close']
-    
     delta = df['close'].diff()
     gain = delta.where(delta > 0, 0).rolling(14).mean()
     loss = -delta.where(delta < 0, 0).rolling(14).mean()
     rs = gain / (loss + 1e-8)
     df['rsi'] = 100 - (100 / (1 + rs))
-    
     ema_12 = df['close'].ewm(span=12).mean()
     ema_26 = df['close'].ewm(span=26).mean()
     df['macd'] = ema_12 - ema_26
     df['macd_signal'] = df['macd'].ewm(span=9).mean()
-    
     df['volume_ma'] = df['volume'].rolling(20).mean()
     df['volume_ratio'] = df['volume'] / (df['volume_ma'] + 1e-8)
-    
     df['high_low'] = df['high'] - df['low']
     df['high_close'] = abs(df['high'] - df['close'].shift(1))
     df['low_close'] = abs(df['low'] - df['close'].shift(1))
     df['true_range'] = df[['high_low', 'high_close', 'low_close']].max(axis=1)
     df['atr'] = df['true_range'].rolling(14).mean()
-    
     df['funding_rate'] = df['momentum_10'].rolling(20).mean() / (df['close'].rolling(20).std() + 1e-8) * 0.00001
     df['open_interest_change'] = (df['volume_ratio'] - 1) * (df['volatility'] / 0.01) * 0.1
-    
     df = df.ffill().bfill()
     df = df.replace([np.inf, -np.inf], 0)
-    
     return df
 
-df_btc = engineer_features(df_btc)
+# ============================================================================
+# DOWNLOAD MODELS FROM HF
+# ============================================================================
+
+def download_model(symbol, timeframe):
+    model_name = f"{symbol}_{timeframe}_model.h5"
+    scalers_name = f"{symbol}_{timeframe}_scalers.pkl"
+    
+    model_path = LOCAL_CACHE / model_name
+    scalers_path = LOCAL_CACHE / scalers_name
+    
+    try:
+        if not model_path.exists():
+            print(f"Downloading {model_name}...", end=" ", flush=True)
+            hf_hub_download(
+                repo_id=HF_REPO,
+                filename=f"{MODELS_FOLDER}/{model_name}",
+                repo_type=HF_REPO_TYPE,
+                cache_dir=str(LOCAL_CACHE),
+                force_filename=model_name
+            )
+            print("Done")
+        
+        if not scalers_path.exists():
+            print(f"Downloading {scalers_name}...", end=" ", flush=True)
+            hf_hub_download(
+                repo_id=HF_REPO,
+                filename=f"{MODELS_FOLDER}/{scalers_name}",
+                repo_type=HF_REPO_TYPE,
+                cache_dir=str(LOCAL_CACHE),
+                force_filename=scalers_name
+            )
+            print("Done")
+        
+        model = tf.keras.models.load_model(str(model_path))
+        with open(scalers_path, 'rb') as f:
+            scalers = pickle.load(f)
+        
+        return model, scalers
+    except Exception as e:
+        print(f"ERROR loading model: {e}")
+        return None, None
 
 # ============================================================================
-# CREATE SEQUENCES AND PREDICT
+# FETCH RECENT DATA
 # ============================================================================
-print("Creating sequences and making predictions...")
 
-X_seq = []
-base_prices = []
-dates = []
+def fetch_recent_data(symbol_ticker, interval, days=400):
+    try:
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days)
+        
+        df = yf.download(symbol_ticker, start=start_date.date(), end=end_date.date(),
+                        interval=interval, progress=False, prepost=False, threads=False)
+        
+        if df is None or len(df) == 0:
+            return None
+        
+        df = df.copy()
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df.columns = [c.lower() for c in df.columns]
+        df.index.name = 'timestamp'
+        df = df.reset_index()
+        
+        required = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
+        if not all(c in df.columns for c in required):
+            return None
+        
+        df = df[required].copy()
+        df = df.dropna()
+        df = df[df['volume'] > 0]
+        
+        return df
+    except Exception as e:
+        print(f"ERROR fetching data: {e}")
+        return None
 
-for i in range(len(df_btc) - lookback - 1):
-    X_seq.append(df_btc[feature_cols].iloc[i:i+lookback].values)
-    base_prices.append(df_btc['close'].iloc[i+lookback-1])
-    dates.append(df_btc['timestamp'].iloc[i+lookback])
+# ============================================================================
+# MAKE PREDICTIONS
+# ============================================================================
 
-X_seq = np.array(X_seq)
-base_prices = np.array(base_prices)
-dates = np.array(dates)
+def predict(model, scalers, df):
+    if model is None or scalers is None:
+        return None, None, None
+    
+    try:
+        feature_cols = scalers['feature_cols']
+        df_feat = engineer_features(df[['timestamp', 'open', 'high', 'low', 'close', 'volume']].copy())
+        
+        if len(df_feat) < LOOKBACK + 1:
+            return None, None, None
+        
+        X = []
+        for i in range(len(df_feat) - LOOKBACK):
+            X.append(df_feat[feature_cols].iloc[i:i+LOOKBACK].values)
+        
+        X = np.array(X)
+        scaler_X = scalers['X']
+        scaler_y = scalers['y']
+        
+        X_norm = X.copy()
+        for i in range(len(X_norm)):
+            X_norm[i] = scaler_X.transform(X[i])
+        
+        y_pred_norm = model.predict([X_norm, X_norm], verbose=0).flatten()
+        y_pred = scaler_y.inverse_transform(y_pred_norm.reshape(-1, 1)).flatten()
+        
+        base_prices = df_feat['close'].iloc[LOOKBACK:-1].values
+        predicted_prices = base_prices * np.exp(y_pred[:-1])
+        actual_prices = df_feat['close'].iloc[LOOKBACK+1:].values
+        timestamps = df_feat['timestamp'].iloc[LOOKBACK+1:].values
+        
+        return timestamps[:len(predicted_prices)], predicted_prices, actual_prices
+    except Exception as e:
+        print(f"ERROR making predictions: {e}")
+        return None, None, None
 
-# Normalize
-X_norm = X_seq.copy()
-for i in range(len(X_norm)):
-    X_norm[i] = scaler_X.transform(X_seq[i])
+# ============================================================================
+# VISUALIZATION
+# ============================================================================
 
-# Predict
-y_pred_norm = model.predict(np.array([X_norm, X_norm]), verbose=0).flatten()
-y_pred = scaler_y.inverse_transform(y_pred_norm.reshape(-1, 1)).flatten()
+def plot_predictions(symbol, timeframe, timestamps, predicted, actual):
+    if timestamps is None or predicted is None:
+        print(f"No predictions available for {symbol} {timeframe}")
+        return
+    
+    fig, ax = plt.subplots(figsize=(14, 6))
+    
+    timestamps = pd.to_datetime(timestamps)
+    
+    ax.plot(timestamps, actual, label='Actual Price', linewidth=2, color='#1f77b4', alpha=0.8)
+    ax.plot(timestamps, predicted, label='Predicted Price', linewidth=2, color='#ff7f0e', alpha=0.8, linestyle='--')
+    
+    ax.fill_between(timestamps, actual, predicted, alpha=0.2, color='#d62728')
+    
+    ax.set_xlabel('Date/Time', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Price (USD)', fontsize=12, fontweight='bold')
+    ax.set_title(f'{symbol} Price Prediction ({timeframe}) - Actual vs Predicted', 
+                 fontsize=14, fontweight='bold')
+    
+    ax.legend(fontsize=11, loc='best')
+    ax.grid(True, alpha=0.3)
+    
+    if timeframe == '1d':
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+        ax.xaxis.set_major_locator(mdates.MonthLocator())
+    else:
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
+        ax.xaxis.set_major_locator(mdates.DayLocator())
+    
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    
+    mape = np.mean(np.abs((actual - predicted) / actual)) * 100
+    rmse = np.sqrt(np.mean((actual - predicted) ** 2))
+    
+    stats_text = f"MAPE: {mape:.4f}% | RMSE: ${rmse:.2f}"
+    ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=11,
+            verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    
+    plt.show()
 
-# Convert to prices
-price_pred = base_prices * np.exp(y_pred)
-price_actual = base_prices * np.exp(df_btc['log_return'].iloc[lookback+1:lookback+1+len(y_pred)].values)
+# ============================================================================
+# INTERACTIVE UI
+# ============================================================================
 
-print(f"✓ Made {len(y_pred)} predictions")
+print("Creating interactive interface...")
 print()
 
-# ============================================================================
-# CALCULATE METRICS
-# ============================================================================
-mae = np.mean(np.abs(price_actual - price_pred))
-rmse = np.sqrt(np.mean((price_actual - price_pred)**2))
-mape = np.mean(np.abs((price_actual - price_pred) / price_actual)) * 100
+symbol_dropdown = widgets.Dropdown(
+    options=list(CRYPTOS.keys()),
+    value='BTC',
+    description='Crypto:'
+)
 
-print("Prediction Metrics:")
-print(f"  MAE:  ${mae:.2f}")
-print(f"  RMSE: ${rmse:.2f}")
-print(f"  MAPE: {mape:.4f}%")
+timeframe_dropdown = widgets.Dropdown(
+    options=TIMEFRAMES,
+    value='1d',
+    description='Timeframe:'
+)
+
+visualize_button = widgets.Button(description='Visualize', button_style='info')
+status_output = widgets.Output()
+
+def on_visualize_clicked(b):
+    with status_output:
+        status_output.clear_output()
+        symbol = symbol_dropdown.value
+        timeframe = timeframe_dropdown.value
+        ticker = CRYPTOS[symbol]
+        
+        print(f"Loading model for {symbol} {timeframe}...")
+        model, scalers = download_model(symbol, timeframe)
+        
+        if model is None:
+            print(f"ERROR: Could not load model")
+            return
+        
+        print(f"Fetching recent data for {symbol}...")
+        days = 3000 if timeframe == '1d' else 400
+        df = fetch_recent_data(ticker, timeframe, days=days)
+        
+        if df is None:
+            print(f"ERROR: Could not fetch data")
+            return
+        
+        print(f"Making predictions...")
+        timestamps, predicted, actual = predict(model, scalers, df)
+        
+        if timestamps is None:
+            print(f"ERROR: Could not make predictions")
+            return
+        
+        print(f"Plotting results...")
+        plot_predictions(symbol, timeframe, timestamps, predicted, actual)
+
+visualize_button.on_click(on_visualize_clicked)
+
 print()
-
-# ============================================================================
-# PLOTTING
-# ============================================================================
-print("Creating visualization...")
-
-fig, axes = plt.subplots(3, 1, figsize=(16, 12))
-
-# Plot 1: Full Predictions
-ax = axes[0]
-ax.plot(dates, price_actual, 'b-', linewidth=2, label='Actual Price', alpha=0.8)
-ax.plot(dates, price_pred, 'orange', linewidth=2, label='Predicted Price', alpha=0.8)
-ax.fill_between(dates, price_actual, price_pred, alpha=0.2, color='gray')
-ax.set_title('BTC Price: Actual vs Predicted (Full Series)', fontsize=14, fontweight='bold')
-ax.set_xlabel('Date', fontsize=12)
-ax.set_ylabel('Price (USD)', fontsize=12)
-ax.legend(fontsize=11, loc='best')
-ax.grid(True, alpha=0.3)
-ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:,.0f}'))
-
-# Plot 2: Last 100 candles (zoomed)
-ax = axes[1]
-if len(dates) > 100:
-    idx_start = -100
-else:
-    idx_start = 0
-
-ax.plot(dates[idx_start:], price_actual[idx_start:], 'b-', linewidth=2.5, label='Actual Price', marker='o', markersize=4, alpha=0.8)
-ax.plot(dates[idx_start:], price_pred[idx_start:], 'orange', linewidth=2.5, label='Predicted Price', marker='s', markersize=4, alpha=0.8)
-ax.fill_between(dates[idx_start:], price_actual[idx_start:], price_pred[idx_start:], alpha=0.2, color='gray')
-ax.set_title(f'BTC Price: Last {-idx_start} Hours (Detailed View)', fontsize=14, fontweight='bold')
-ax.set_xlabel('Date', fontsize=12)
-ax.set_ylabel('Price (USD)', fontsize=12)
-ax.legend(fontsize=11, loc='best')
-ax.grid(True, alpha=0.3)
-ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:,.0f}'))
-plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
-
-# Plot 3: Prediction Error Over Time
-ax = axes[2]
-error = price_actual - price_pred
-error_pct = (error / price_actual) * 100
-
-ax.bar(dates, error_pct, color=['green' if e > 0 else 'red' for e in error_pct], alpha=0.7, width=0.03)
-ax.axhline(y=0, color='black', linestyle='--', linewidth=1)
-ax.set_title('Prediction Error (Actual - Predicted) in Percentage', fontsize=14, fontweight='bold')
-ax.set_xlabel('Date', fontsize=12)
-ax.set_ylabel('Error (%)', fontsize=12)
-ax.grid(True, alpha=0.3, axis='y')
-
-# Add metrics text
-error_stats = f"Mean Error: {np.mean(error_pct):.4f}% | Std Dev: {np.std(error_pct):.4f}% | Max: {np.max(np.abs(error_pct)):.4f}%"
-ax.text(0.5, 0.95, error_stats, transform=ax.transAxes, ha='center', va='top',
-        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5), fontsize=10)
-
-plt.tight_layout()
-
-# Save figure
-output_path = CACHE_DIR / 'prediction_visualization.png'
-plt.savefig(str(output_path), dpi=150, bbox_inches='tight')
-print(f"✓ Visualization saved: {output_path}")
-
-plt.show()
-
-# ============================================================================
-# SUMMARY STATISTICS
-# ============================================================================
-print("\n" + "="*80)
-print("PREDICTION SUMMARY")
 print("="*80)
-print(f"\nData Range: {dates[0]} to {dates[-1]}")
-print(f"Predictions Made: {len(y_pred)}")
-print(f"\nPrice Range:")
-print(f"  Actual Min: ${price_actual.min():,.2f}")
-print(f"  Actual Max: ${price_actual.max():,.2f}")
-print(f"  Predicted Min: ${price_pred.min():,.2f}")
-print(f"  Predicted Max: ${price_pred.max():,.2f}")
-print(f"\nError Analysis:")
-print(f"  MAE: ${mae:.2f}")
-print(f"  RMSE: ${rmse:.2f}")
-print(f"  MAPE: {mape:.4f}%")
-print(f"  Mean Error: {np.mean(error_pct):.4f}%")
-print(f"  Std Dev: {np.std(error_pct):.4f}%")
-print(f"  Max Absolute Error: {np.max(np.abs(error_pct)):.4f}%")
-print(f"\nDirection Accuracy:")
-direction_correct = np.sum((error > 0) == (np.diff(price_actual) > 0))
-direction_accuracy = (direction_correct / (len(error) - 1)) * 100
-print(f"  {direction_accuracy:.2f}%")
+print("INTERACTIVE CONTROLS")
+print("="*80)
+
+ui = widgets.VBox([
+    widgets.HBox([symbol_dropdown, timeframe_dropdown]),
+    visualize_button,
+    status_output
+])
+
+display(ui)
+
 print()
+print("Select a cryptocurrency and timeframe, then click 'Visualize' to see predictions.")
