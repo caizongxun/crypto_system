@@ -1,18 +1,11 @@
 #!/usr/bin/env python3
 # ============================================================================
-# Crypto System v2 - Multi-Crypto Multi-Timeframe Training (ENHANCED)
+# Crypto System v2 - Multi-Crypto Multi-Timeframe Training (FIXED)
 # ============================================================================
 # Trains individual models for 20+ cryptocurrencies
 # Timeframes: 1h (1-hour) and 15m (15-minute)
 # Data: 7000-10000 candles per timeframe
 # Multiple Binance endpoints for maximum data coverage
-#
-# Output: /content/all_models/multi_crypto/
-#   - BTC_1h_model.h5
-#   - BTC_1h_scalers.pkl
-#   - BTC_15m_model.h5
-#   - BTC_15m_scalers.pkl
-#   - ... (for each of 20+ coins)
 
 import os
 import time
@@ -30,22 +23,19 @@ from tensorflow.keras.layers import (
     Input, LSTM, Dense, Dropout, Concatenate, Conv1D, BatchNormalization
 )
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import mean_absolute_error, mean_squared_error
 
+# Install CCXT if needed
 try:
     import ccxt
-    HAS_CCXT = True
 except:
-    HAS_CCXT = False
-    print("WARNING: CCXT not installed. Installing...")
+    print("Installing CCXT...")
     os.system('pip install ccxt -q')
     import ccxt
-    HAS_CCXT = True
 
 print("="*80)
-print("CRYPTO SYSTEM v2 - ENHANCED MULTI-CRYPTO MULTI-TIMEFRAME TRAINING")
+print("CRYPTO SYSTEM v2 - ENHANCED MULTI-CRYPTO MULTI-TIMEFRAME TRAINING (FIXED)")
 print("20+ Cryptocurrencies × 2 Timeframes × 7000-10000 Candles")
 print("="*80 + "\n")
 
@@ -67,214 +57,161 @@ print(f"✓ Output directory: {OUTPUT_DIR}\n")
 # CONFIGURATION
 # ============================================================================
 
-# 24 Cryptocurrencies (select popular ones)
 CRYPTOS = [
     'BTC', 'ETH', 'BNB', 'SOL', 'XRP', 'ADA', 'DOGE', 'AVAX', 'MATIC',
     'LTC', 'DOT', 'UNI', 'LINK', 'XLM', 'ATOM', 'ICP', 'FIL', 'NEAR',
     'SAND', 'MANA', 'SHIB', 'OP', 'ARB', 'BLUR'
 ]
 
-# Timeframes
 TIMEFRAMES = ['1h', '15m']
 
-# Training config
-LOOKBACK = 60  # Number of candles to look back
+LOOKBACK = 60
 EPOCHS = 40
 BATCH_SIZE = 32
 EARLY_STOP_PATIENCE = 8
 
-# Data fetching
-CANDLES_PER_FETCH = 1000  # CCXT limit per request
-TARGET_CANDLES = 8000     # Target total candles
-NUM_FETCHES = (TARGET_CANDLES + CANDLES_PER_FETCH - 1) // CANDLES_PER_FETCH
-
-print(f"Cryptocurrencies to train: {len(CRYPTOS)}")
-print(f"  {', '.join(CRYPTOS[:5])}... (+{len(CRYPTOS)-5} more)")
+print(f"Cryptocurrencies: {len(CRYPTOS)}")
 print(f"Timeframes: {TIMEFRAMES}")
-print(f"Target candles per timeframe: {TARGET_CANDLES}")
 print(f"Total models to train: {len(CRYPTOS) * len(TIMEFRAMES)}")
 print(f"Lookback period: {LOOKBACK} candles\n")
-
-# ============================================================================
-# BINANCE ENDPOINTS
-# ============================================================================
-
-BINANCE_ENDPOINTS = [
-    ('binance', 'Binance Global'),
-    ('binanceus', 'Binance US'),
-    ('binanceusdm', 'Binance USDM'),
-]
 
 # ============================================================================
 # FEATURE ENGINEERING
 # ============================================================================
 
 def engineer_features(df):
-    """
-    Compute technical features for all cryptocurrencies.
-    """
     df = df.copy()
     
-    # Returns
     df['log_return'] = np.log(df['close'] / df['close'].shift(1))
     df['simple_return'] = (df['close'] - df['close'].shift(1)) / df['close'].shift(1)
     
-    # Volatility
     df['volatility'] = df['log_return'].rolling(14).std()
     df['volatility_20'] = df['log_return'].rolling(20).std()
     
-    # Momentum
     df['momentum_10'] = df['close'] - df['close'].shift(10)
     df['momentum_20'] = df['close'] - df['close'].shift(20)
     
-    # Price range
     df['price_range'] = (df['high'] - df['low']) / df['close']
     
-    # RSI
     delta = df['close'].diff()
     gain = delta.where(delta > 0, 0).rolling(14).mean()
     loss = -delta.where(delta < 0, 0).rolling(14).mean()
     rs = gain / (loss + 1e-8)
     df['rsi'] = 100 - (100 / (1 + rs))
     
-    # MACD
     ema_12 = df['close'].ewm(span=12).mean()
     ema_26 = df['close'].ewm(span=26).mean()
     df['macd'] = ema_12 - ema_26
     df['macd_signal'] = df['macd'].ewm(span=9).mean()
     
-    # Volume
     df['volume_ma'] = df['volume'].rolling(20).mean()
     df['volume_ratio'] = df['volume'] / (df['volume_ma'] + 1e-8)
     
-    # ATR
     df['high_low'] = df['high'] - df['low']
     df['high_close'] = abs(df['high'] - df['close'].shift(1))
     df['low_close'] = abs(df['low'] - df['close'].shift(1))
     df['true_range'] = df[['high_low', 'high_close', 'low_close']].max(axis=1)
     df['atr'] = df['true_range'].rolling(14).mean()
     
-    # Funding rate proxy
     df['funding_rate'] = df['momentum_10'].rolling(20).mean() / (df['close'].rolling(20).std() + 1e-8) * 0.00001
-    
-    # Open interest proxy
     df['open_interest_change'] = (df['volume_ratio'] - 1) * (df['volatility'] / 0.01) * 0.1
     
-    # Fill NaN
     df = df.ffill().bfill()
     df = df.replace([np.inf, -np.inf], 0)
     
     return df
 
 # ============================================================================
-# FETCH DATA FOR SINGLE CRYPTO (MULTI-ENDPOINT)
+# FETCH DATA (SIMPLIFIED & FIXED)
 # ============================================================================
 
-def fetch_crypto_data_multi_endpoint(symbol, timeframe):
+def fetch_crypto_data(symbol, timeframe):
     """
-    Fetch OHLCV data from multiple Binance endpoints.
-    Tries each endpoint until successful.
+    Fetch data using Binance API with proper error handling.
     """
-    all_ohlcv = []
-    fetched_candles = 0
-    
-    for exchange_name, exchange_label in BINANCE_ENDPOINTS:
-        if fetched_candles >= TARGET_CANDLES:
-            break
+    try:
+        print(f"    Fetching {symbol} {timeframe}...", end=" ")
         
-        try:
-            print(f"      {exchange_label}...", end=" ")
-            exchange_class = getattr(ccxt, exchange_name)
-            exchange = exchange_class({'enableRateLimit': True})
-            
-            symbol_full = f"{symbol}/USDT"
-            
-            # Check if symbol is supported
-            if hasattr(exchange, 'symbols'):
-                if symbol_full not in exchange.symbols:
-                    print(f"Symbol not found")
-                    continue
-            
-            # Fetch multiple times to accumulate candles
-            ohlcv_data = []
-            since = None
-            
-            for fetch_num in range(NUM_FETCHES):
-                if fetched_candles >= TARGET_CANDLES:
+        # Use binance exchange
+        exchange = ccxt.binance({
+            'enableRateLimit': True,
+            'timeout': 30000,
+            'rateLimit': 500
+        })
+        
+        symbol_full = f"{symbol}/USDT"
+        
+        # Fetch multiple batches
+        all_data = []
+        since = None
+        
+        for batch in range(8):  # 8 batches × 1000 candles = 8000 candles
+            try:
+                # Fetch 1000 candles
+                ohlcv = exchange.fetch_ohlcv(
+                    symbol_full,
+                    timeframe,
+                    since=since,
+                    limit=1000
+                )
+                
+                if not ohlcv or len(ohlcv) == 0:
                     break
                 
-                try:
-                    ohlcv = exchange.fetch_ohlcv(
-                        symbol_full,
-                        timeframe,
-                        since=since,
-                        limit=CANDLES_PER_FETCH
-                    )
-                    
-                    if not ohlcv or len(ohlcv) == 0:
-                        break
-                    
-                    ohlcv_data.extend(ohlcv)
-                    fetched_candles += len(ohlcv)
-                    
-                    # Update since for next batch
-                    since = ohlcv[-1][0] + 1
-                    
-                    time.sleep(0.5)  # Rate limit
-                    
-                except Exception as e:
-                    print(f"Fetch error: {str(e)[:30]}")
-                    break
-            
-            if ohlcv_data:
-                all_ohlcv.extend(ohlcv_data)
-                print(f"{len(ohlcv_data)} candles")
+                all_data.extend(ohlcv)
+                
+                # Update since for next batch
+                if ohlcv:
+                    since = int(ohlcv[-1][0]) + 1
+                
+                time.sleep(0.3)  # Rate limit
+                
+            except Exception as e:
+                if batch == 0:
+                    raise  # If first batch fails, raise error
+                break  # Otherwise, continue with what we have
         
-        except Exception as e:
-            print(f"Error: {str(e)[:40]}")
-            continue
-    
-    if not all_ohlcv:
-        print(f"      NO DATA from any endpoint")
+        if not all_data:
+            print("NO DATA")
+            return None
+        
+        # Create DataFrame
+        df = pd.DataFrame(
+            all_data,
+            columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
+        )
+        
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df = df.drop_duplicates(subset=['timestamp'])
+        df = df.sort_values('timestamp').reset_index(drop=True)
+        
+        print(f"{len(df)} candles")
+        return df
+        
+    except Exception as e:
+        print(f"ERROR: {str(e)[:50]}")
         return None
-    
-    # Remove duplicates and sort
-    df = pd.DataFrame(
-        all_ohlcv,
-        columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
-    )
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    df = df.drop_duplicates(subset=['timestamp'], keep='first')
-    df = df.sort_values('timestamp').reset_index(drop=True)
-    
-    return df
 
 # ============================================================================
 # BUILD LSTM MODEL
 # ============================================================================
 
 def build_lstm_model(n_features, lookback):
-    """
-    Build the dual-stream LSTM model.
-    """
     input_main = Input(shape=(lookback, n_features), name='input_main')
     input_aux = Input(shape=(lookback, n_features), name='input_aux')
     
-    # Stream 1: LSTM
     x1 = LSTM(64, activation='relu', return_sequences=True)(input_main)
     x1 = BatchNormalization()(x1)
     x1 = Dropout(0.2)(x1)
     x1 = LSTM(32, activation='relu', return_sequences=False)(x1)
     x1 = Dropout(0.2)(x1)
     
-    # Stream 2: Conv1D + LSTM
     x2 = Conv1D(filters=32, kernel_size=3, activation='relu', padding='same')(input_aux)
     x2 = BatchNormalization()(x2)
     x2 = Dropout(0.2)(x2)
     x2 = LSTM(32, activation='relu', return_sequences=False)(x2)
     x2 = Dropout(0.2)(x2)
     
-    # Merge
     combined = Concatenate()([x1, x2])
     z = Dense(32, activation='relu')(combined)
     z = BatchNormalization()(z)
@@ -297,23 +234,17 @@ def build_lstm_model(n_features, lookback):
 # ============================================================================
 
 def train_crypto_model(symbol, timeframe):
-    """
-    Train model for a single cryptocurrency and timeframe.
-    Returns: (success, mape)
-    """
     print(f"\n{'='*80}")
     print(f"Training: {symbol} {timeframe}")
     print(f"{'='*80}")
     
-    # 1. Fetch data from multiple endpoints
-    print(f"  Phase 1: Fetching data from multiple endpoints...")
-    df = fetch_crypto_data_multi_endpoint(symbol, timeframe)
+    # 1. Fetch data
+    print(f"  Phase 1: Fetching data...")
+    df = fetch_crypto_data(symbol, timeframe)
     
     if df is None or len(df) < LOOKBACK + 100:
         print(f"  SKIP: Not enough data ({len(df) if df is not None else 0} candles)")
         return False, None
-    
-    print(f"    Total candles collected: {len(df)}")
     
     # 2. Feature engineering
     print(f"  Phase 2: Computing features...", end=" ")
@@ -374,7 +305,6 @@ def train_crypto_model(symbol, timeframe):
     scaler_y.fit(y_train.reshape(-1, 1))
     y_train_norm = scaler_y.transform(y_train.reshape(-1, 1)).flatten()
     y_val_norm = scaler_y.transform(y_val.reshape(-1, 1)).flatten()
-    y_test_norm = scaler_y.transform(y_test.reshape(-1, 1)).flatten()
     print("Done")
     
     # 6. Train model
@@ -441,7 +371,7 @@ def train_crypto_model(symbol, timeframe):
 # MAIN TRAINING LOOP
 # ============================================================================
 
-print("\nStarting enhanced multi-crypto training...\n")
+print("\nStarting training...\n")
 
 results = []
 total_models = len(CRYPTOS) * len(TIMEFRAMES)
@@ -487,13 +417,13 @@ for status in df_results['status'].unique():
 print(f"\nSuccessful Models: {len(df_results[df_results['status'] == 'SUCCESS'])}")
 
 if len(df_results[df_results['status'] == 'SUCCESS']) > 0:
-    print(f"\nMAPE Statistics (for successful models):")
+    print(f"\nMAPE Statistics:")
     mape_data = df_results[df_results['status'] == 'SUCCESS']['mape']
     print(f"  Mean MAPE: {mape_data.mean():.4f}%")
     print(f"  Median MAPE: {mape_data.median():.4f}%")
     print(f"  Best MAPE: {mape_data.min():.4f}%")
     print(f"  Worst MAPE: {mape_data.max():.4f}%")
-    print(f"\nBest performing models:")
+    print(f"\nTop 5 models:")
     top_5 = df_results[df_results['status'] == 'SUCCESS'].nsmallest(5, 'mape')
     for _, row in top_5.iterrows():
         print(f"    {row['symbol']:6} {row['timeframe']:3} - MAPE: {row['mape']:.4f}%")
@@ -502,5 +432,5 @@ print(f"\nAll models saved to: {OUTPUT_DIR}")
 print(f"Total files created: {len(list(OUTPUT_DIR.glob('*')))}")
 
 print("\n" + "="*80)
-print("✓ ENHANCED MULTI-CRYPTO TRAINING COMPLETE!")
+print("✓ TRAINING COMPLETE!")
 print("="*80)
